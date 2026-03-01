@@ -8,8 +8,18 @@ import math
 # --- Constants ---
 DEFAULT_ROWS = 10
 DEFAULT_COLS = 10
-CELL_SIZE = 50
+CELL_SIZE = 50       # default, recalculated dynamically
 DELAY = 0.05
+
+# Max canvas area (leaves room for sidebar ~220px)
+MAX_CANVAS_W = 900
+MAX_CANVAS_H = 620
+
+def calc_cell_size(rows, cols):
+    """Return the largest square cell size that keeps grid within MAX bounds."""
+    size_w = MAX_CANVAS_W // cols
+    size_h = MAX_CANVAS_H // rows
+    return max(10, min(size_w, size_h, 50))  # clamp between 10 and 50
 
 # Colors
 EMPTY_COLOR = "white"
@@ -60,6 +70,7 @@ class GridApp:
 
         self.rows = DEFAULT_ROWS
         self.cols = DEFAULT_COLS
+        self.cell_size = calc_cell_size(DEFAULT_ROWS, DEFAULT_COLS)
         self.mode = "wall"
         self.start_pos = None
         self.target_pos = None
@@ -98,8 +109,8 @@ class GridApp:
 
         self.canvas = tk.Canvas(
             canvas_frame,
-            width=self.cols * CELL_SIZE,
-            height=self.rows * CELL_SIZE,
+            width=self.cols * self.cell_size,
+            height=self.rows * self.cell_size,
             bg="white", highlightthickness=0
         )
         self.canvas.pack()
@@ -107,7 +118,7 @@ class GridApp:
         self.canvas.bind("<B1-Motion>", self.cell_clicked)
 
         # ── Scrollable Sidebar (right) ──
-        sidebar_h = DEFAULT_ROWS * CELL_SIZE
+        sidebar_h = DEFAULT_ROWS * self.cell_size
         sidebar_container = tk.Frame(top_frame, bg=SIDEBAR_BG, width=210, height=sidebar_h)
         sidebar_container.pack(side="left", fill="y", padx=(0, 10), pady=10, anchor="n")
         sidebar_container.pack_propagate(False)
@@ -279,26 +290,28 @@ class GridApp:
     def apply_grid_size(self):
         self.rows = self.rows_var.get()
         self.cols = self.cols_var.get()
+        self.cell_size = calc_cell_size(self.rows, self.cols)
         self.start_pos = None
         self.target_pos = None
         self.grid = []
-        new_w = self.cols * CELL_SIZE
-        new_h = self.rows * CELL_SIZE
+        new_w = self.cols * self.cell_size
+        new_h = self.rows * self.cell_size
         self.canvas.config(width=new_w, height=new_h)
         self.canvas.delete("all")
         self.sidebar_container.config(height=new_h)
         self.create_grid()
-        self.root.geometry("")  # Let window auto-resize to fit new grid
+        self.root.geometry("")
 
     def create_grid(self):
         self.grid = []
+        cs = self.cell_size
         for row in range(self.rows):
             row_cells = []
             for col in range(self.cols):
-                x1 = col * CELL_SIZE
-                y1 = row * CELL_SIZE
-                x2 = x1 + CELL_SIZE
-                y2 = y1 + CELL_SIZE
+                x1 = col * cs
+                y1 = row * cs
+                x2 = x1 + cs
+                y2 = y1 + cs
                 rect = self.canvas.create_rectangle(x1, y1, x2, y2,
                                                      fill=EMPTY_COLOR, outline="gray")
                 row_cells.append(Cell(row, col, rect))
@@ -308,8 +321,8 @@ class GridApp:
         self.mode = mode
 
     def cell_clicked(self, event):
-        col = event.x // CELL_SIZE
-        row = event.y // CELL_SIZE
+        col = event.x // self.cell_size
+        row = event.y // self.cell_size
         if not (0 <= row < self.rows and 0 <= col < self.cols):
             return
         cell = self.grid[row][col]
@@ -348,11 +361,12 @@ class GridApp:
         # Remove old text
         self.canvas.delete(f"txt_{row}_{col}")
         if number is not None:
+            cs = self.cell_size
             self.canvas.create_text(
-                col * CELL_SIZE + CELL_SIZE // 2,
-                row * CELL_SIZE + CELL_SIZE // 2,
+                col * cs + cs // 2,
+                row * cs + cs // 2,
                 text=str(number), fill="black",
-                font=("Arial", 7),
+                font=("Arial", max(6, cs // 6)),
                 tags=f"txt_{row}_{col}"
             )
 
@@ -454,24 +468,109 @@ class GridApp:
         return path
 
     def path_blocked(self):
-        """Check if any cell in current_path is now a wall."""
+        """Check if any cell ahead in current_path is now a wall."""
         for r, c in self.current_path:
+            if (r, c) == self.start_pos or (r, c) == self.target_pos:
+                continue
             if self.grid[r][c].type == "wall":
                 return True
         return False
 
-    def spawn_dynamic_obstacle(self):
-        """Randomly spawn a new obstacle with given probability."""
-        if random.random() < self.dynamic_prob.get():
-            r = random.randint(0, self.rows - 1)
-            c = random.randint(0, self.cols - 1)
-            if (r, c) not in (self.start_pos, self.target_pos):
-                if self.grid[r][c].type == "empty":
-                    self.update_cell_type(r, c, "wall")
-                    return (r, c)
+    def spawn_one_obstacle(self):
+        """
+        Unconditionally place one wall on a random non-special cell.
+        Returns (r, c) placed or None if no valid cell found.
+        """
+        candidates = []
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if (r, c) == self.start_pos or (r, c) == self.target_pos:
+                    continue
+                if self.grid[r][c].type != "wall":
+                    candidates.append((r, c))
+        if not candidates:
+            return None
+        r, c = random.choice(candidates)
+        self.grid[r][c].type = "wall"
+        self.canvas.itemconfig(self.grid[r][c].canvas_id, fill=WALL_COLOR)
+        self.canvas.delete(f"txt_{r}_{c}")
+        return (r, c)
+
+    # --- Non-animated search (used during dynamic replanning) ---
+    def _search_silent(self, algo, start):
+        """Run search WITHOUT animation - used for fast replanning during dynamic mode."""
+        if algo == "Greedy Best-First":
+            return self._gbfs_silent(start)
+        else:
+            return self._astar_silent(start)
+
+    def _gbfs_silent(self, start):
+        h = self.heuristic_value(start[0], start[1])
+        start_node = Node(*start, h=h)
+        open_list = [(h, id(start_node), start_node)]
+        visited = {start}
+        while open_list:
+            _, _, curr = heapq.heappop(open_list)
+            if (curr.r, curr.c) == self.target_pos:
+                return curr
+            for nr, nc in self.get_neighbors(curr.r, curr.c):
+                if (nr, nc) not in visited:
+                    visited.add((nr, nc))
+                    h = self.heuristic_value(nr, nc)
+                    neighbor = Node(nr, nc, curr, h=h)
+                    neighbor.f = h
+                    heapq.heappush(open_list, (h, id(neighbor), neighbor))
         return None
 
-    # --- Algorithm: run from a given start to target ---
+    def _astar_silent(self, start):
+        h = self.heuristic_value(start[0], start[1])
+        start_node = Node(*start, g=0, h=h)
+        open_list = [(start_node.f, id(start_node), start_node)]
+        visited = {}
+        while open_list:
+            _, _, curr = heapq.heappop(open_list)
+            pos = (curr.r, curr.c)
+            if pos == self.target_pos:
+                return curr
+            if pos in visited and visited[pos] <= curr.g:
+                continue
+            visited[pos] = curr.g
+            for nr, nc in self.get_neighbors(curr.r, curr.c):
+                new_g = curr.g + 1
+                if (nr, nc) not in visited or visited.get((nr, nc), float('inf')) > new_g:
+                    h = self.heuristic_value(nr, nc)
+                    neighbor = Node(nr, nc, curr, g=new_g, h=h)
+                    heapq.heappush(open_list, (neighbor.f, id(neighbor), neighbor))
+        return None
+
+    def _draw_path_silent(self, node):
+        """Draw path on canvas from a node without animation."""
+        path = []
+        curr = node
+        while curr:
+            path.append((curr.r, curr.c))
+            curr = curr.parent
+        path.reverse()
+        self.current_path = path
+        self.path_cost = len(path) - 1
+        for r, c in path:
+            if (r, c) != self.start_pos and (r, c) != self.target_pos:
+                self.grid[r][c].type = "path"
+                self.canvas.itemconfig(self.grid[r][c].canvas_id, fill=PATH_COLOR)
+        self.update_metrics()
+        return path
+
+    def _clear_visual_path(self):
+        """Clear only the visual path (green cells) without touching walls."""
+        for r, c in self.current_path:
+            if (r, c) == self.start_pos or (r, c) == self.target_pos:
+                continue
+            if self.grid[r][c].type == "path":
+                self.grid[r][c].type = "empty"
+                self.canvas.itemconfig(self.grid[r][c].canvas_id, fill=EMPTY_COLOR)
+        self.current_path = []
+
+    # --- Animated algorithms (initial search with visualization) ---
     def run_gbfs(self, start):
         h = self.heuristic_value(start[0], start[1])
         start_node = Node(*start, h=h)
@@ -550,66 +649,131 @@ class GridApp:
             pass
 
     def _run_dynamic(self, algo):
-        """Dynamic mode: run search, then simulate agent moving and spawning obstacles."""
+        """
+        Dynamic Mode — fulfills all 3 requirements:
+        1. Spawn obstacles with user-defined probability at every time step
+        2. Detect if new obstacle blocks current path → replan immediately from agent position
+        3. Efficient: only replan when obstacle is ON the current path
+        """
         start_time = time.time()
+        AGENT_COLOR = "#FF4500"
+        prob = self.dynamic_prob.get()
 
-        def search_from(pos):
-            self.clear_path_only()
+        # ── helpers ──────────────────────────────────────────────
+        def draw_agent(r, c):
+            cs = self.cell_size
+            self.canvas.delete("agent_marker")
+            self.canvas.create_oval(
+                c * cs + 4, r * cs + 4,
+                c * cs + cs - 4, r * cs + cs - 4,
+                fill=AGENT_COLOR, outline="white", width=2,
+                tags="agent_marker"
+            )
+            self.root.update()
+
+        def restore_cell(r, c):
+            """Restore a cell the agent just left back to path colour."""
+            if (r, c) != self.start_pos and (r, c) != self.target_pos:
+                if self.grid[r][c].type != "wall":
+                    self.grid[r][c].type = "path"
+                    self.canvas.itemconfig(self.grid[r][c].canvas_id, fill=PATH_COLOR)
+
+        def try_spawn():
+            """
+            Requirement 1 — attempt to spawn ONE obstacle this time step
+            with probability = prob. Returns True if a wall was placed.
+            """
+            if random.random() >= prob:
+                return False          # probability gate
+            # pick any non-special, non-wall cell
+            r = random.randint(0, self.rows - 1)
+            c = random.randint(0, self.cols - 1)
+            if (r, c) == self.start_pos or (r, c) == self.target_pos:
+                return False
+            if self.grid[r][c].type == "wall":
+                return False
+            # place wall
+            self.grid[r][c].type = "wall"
+            self.canvas.itemconfig(self.grid[r][c].canvas_id, fill=WALL_COLOR)
+            self.canvas.delete(f"txt_{r}_{c}")
+            self.root.update()
+            return True
+
+        def replan(from_pos):
+            """
+            Requirement 2 & 3 — silent, fast replan from agent's current position.
+            Clears only the old green path, keeps walls and explored cells.
+            """
+            self._clear_visual_path()
+            node = self._search_silent(algo, from_pos)
+            if node is None:
+                return None
+            return self._draw_path_silent(node)
+
+        # ── initial animated search ──────────────────────────────
+        self.clear_path_only()
+        try:
             if algo == "Greedy Best-First":
-                return self.run_gbfs(pos)
+                found = self.run_gbfs(self.start_pos)
             else:
-                return self.run_astar(pos)
+                found = self.run_astar(self.start_pos)
+        except StopIteration:
+            return
 
-        found_node = search_from(self.start_pos)
-        if not found_node:
+        if not found:
             self.set_status("No Path Found", "red")
             self.exec_time = (time.time() - start_time) * 1000
             self.update_metrics()
             return
 
-        path = self.reconstruct_path(found_node)
+        path = self.reconstruct_path(found)
         self.root.update()
-        time.sleep(DELAY)
+        time.sleep(0.25)
 
-        # Agent walks along path step by step
-        agent_pos_idx = 0
-        while agent_pos_idx < len(path) - 1:
+        # ── agent walk loop ──────────────────────────────────────
+        idx = 0          # agent's index in path
+        draw_agent(*path[0])
+
+        while idx < len(path) - 1:
             if self.stop_flag:
                 break
 
-            # Spawn dynamic obstacle
-            new_wall = self.spawn_dynamic_obstacle()
+            # --- Requirement 1: try to spawn obstacle this time step ---
+            spawned = try_spawn()
 
-            # Check if path blocked
-            if new_wall and self.path_blocked():
-                self.set_status("Re-planning...", "#FF6600")
-                current_agent_pos = path[agent_pos_idx]
-                # Re-plan from current agent position
-                found_node = search_from(current_agent_pos)
-                if not found_node:
+            # --- Requirement 2 & 3: check ONLY if spawn happened AND it's on path ---
+            if spawned and self.path_blocked():
+                self.set_status("Obstacle! Re-planning...", "#FF6600")
+                agent_pos = path[idx]
+                self.canvas.delete("agent_marker")
+                new_path = replan(agent_pos)
+                if new_path is None:
                     self.set_status("No Path Found", "red")
                     self.exec_time = (time.time() - start_time) * 1000
                     self.update_metrics()
                     return
-                path = self.reconstruct_path(found_node)
-                # Re-adjust path to start from current position
-                agent_pos_idx = 0
+                path = new_path
+                idx = 0
+                draw_agent(*path[0])
                 self.root.update()
-                time.sleep(DELAY * 2)
+                time.sleep(0.25)
                 continue
 
-            # Move agent one step
-            agent_pos_idx += 1
-            ar, ac = path[agent_pos_idx]
-            if (ar, ac) != self.target_pos:
-                self.grid[ar][ac].type = "path"
-                self.update_cell_color(ar, ac)
-            self.root.update()
-            time.sleep(DELAY * 2)
+            # --- Move agent one step ---
+            prev_r, prev_c = path[idx]
+            idx += 1
+            ar, ac = path[idx]
 
+            self.canvas.delete("agent_marker")
+            restore_cell(prev_r, prev_c)
+            draw_agent(ar, ac)
+            time.sleep(0.15)
+
+        # done
+        self.canvas.delete("agent_marker")
         self.exec_time = (time.time() - start_time) * 1000
         if not self.stop_flag:
-            self.set_status("Path Found!", "green")
+            self.set_status("Target Reached!", "green")
         self.update_metrics()
 
 
