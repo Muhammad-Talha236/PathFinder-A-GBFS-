@@ -57,7 +57,6 @@ class GridApp:
     def __init__(self, root):
         self.root = root
         self.root.title("AI Pathfinder - Informed Search")
-        self.root.resizable(False, False)
 
         self.rows = DEFAULT_ROWS
         self.cols = DEFAULT_COLS
@@ -85,29 +84,59 @@ class GridApp:
         self.create_grid()
 
     def _build_ui(self):
-        # Main frame
+        # ── Root layout: top area (grid + sidebar) and bottom bar ──
         main_frame = tk.Frame(self.root, bg=SIDEBAR_BG)
         main_frame.pack(fill="both", expand=True)
 
-        # Canvas frame
-        canvas_frame = tk.Frame(main_frame, bg="white")
-        canvas_frame.grid(row=0, column=0, padx=10, pady=10)
+        # ── TOP: grid on left, sidebar on right ──
+        top_frame = tk.Frame(main_frame, bg=SIDEBAR_BG)
+        top_frame.pack(fill="both", expand=True)
+
+        # Canvas
+        canvas_frame = tk.Frame(top_frame, bg="white", relief="solid", bd=1)
+        canvas_frame.pack(side="left", padx=10, pady=10, anchor="n")
 
         self.canvas = tk.Canvas(
             canvas_frame,
             width=self.cols * CELL_SIZE,
             height=self.rows * CELL_SIZE,
-            bg="white"
+            bg="white", highlightthickness=0
         )
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self.cell_clicked)
         self.canvas.bind("<B1-Motion>", self.cell_clicked)
 
-        # Sidebar
-        sidebar = tk.Frame(main_frame, bg=SIDEBAR_BG, width=200)
-        sidebar.grid(row=0, column=1, sticky="ns", padx=5, pady=5)
-        sidebar.grid_propagate(False)
+        # ── Scrollable Sidebar (right) ──
+        sidebar_h = DEFAULT_ROWS * CELL_SIZE
+        sidebar_container = tk.Frame(top_frame, bg=SIDEBAR_BG, width=210, height=sidebar_h)
+        sidebar_container.pack(side="left", fill="y", padx=(0, 10), pady=10, anchor="n")
+        sidebar_container.pack_propagate(False)
+        self.sidebar_container = sidebar_container
 
+        sb_canvas = tk.Canvas(sidebar_container, bg=SIDEBAR_BG, highlightthickness=0, width=193)
+        sb_canvas.pack(side="left", fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(sidebar_container, orient="vertical", command=sb_canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        sb_canvas.configure(yscrollcommand=scrollbar.set)
+
+        sidebar = tk.Frame(sb_canvas, bg=SIDEBAR_BG)
+        sidebar_window = sb_canvas.create_window((0, 0), window=sidebar, anchor="nw")
+
+        def _on_frame_configure(event):
+            sb_canvas.configure(scrollregion=sb_canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            sb_canvas.itemconfig(sidebar_window, width=event.width)
+
+        sidebar.bind("<Configure>", _on_frame_configure)
+        sb_canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            sb_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        sb_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # ── Sidebar helpers ──
         def section(text):
             tk.Label(sidebar, text=text, bg=SIDEBAR_BG,
                      font=("Arial", 9, "bold"), fg="#333").pack(pady=(8, 2), anchor="w", padx=5)
@@ -184,34 +213,60 @@ class GridApp:
                                     relief="sunken", font=("Arial", 9), width=18)
         self.status_lbl.pack(pady=3, padx=5, fill="x")
 
-        # Metrics
-        section("Metrics:")
-        metrics_frame = tk.Frame(sidebar, bg="white", relief="sunken", bd=1)
-        metrics_frame.pack(fill="x", padx=5, pady=2)
+        # ── BOTTOM BAR: Metrics + Legend side by side ──
+        bottom_bar = tk.Frame(main_frame, bg="#e0e0e0", relief="groove", bd=1)
+        bottom_bar.pack(fill="x", padx=10, pady=(0, 8))
 
-        self.nodes_lbl = tk.Label(metrics_frame, text="Nodes Visited: 0",
-                                   bg="white", font=("Arial", 8), anchor="w")
-        self.nodes_lbl.pack(fill="x", padx=5, pady=1)
-        self.cost_lbl = tk.Label(metrics_frame, text="Path Cost: 0",
-                                  bg="white", font=("Arial", 8), anchor="w")
-        self.cost_lbl.pack(fill="x", padx=5, pady=1)
-        self.time_lbl = tk.Label(metrics_frame, text="Exec Time: 0 ms",
-                                  bg="white", font=("Arial", 8), anchor="w")
-        self.time_lbl.pack(fill="x", padx=5, pady=1)
+        # -- Metrics section (left) --
+        metrics_section = tk.Frame(bottom_bar, bg="#e0e0e0")
+        metrics_section.pack(side="left", padx=15, pady=6)
 
-        # Legend
-        section("Legend:")
-        legend_frame = tk.Frame(sidebar, bg=SIDEBAR_BG)
-        legend_frame.pack(fill="x", padx=5)
+        tk.Label(metrics_section, text="📊  Metrics", bg="#e0e0e0",
+                 font=("Arial", 9, "bold"), fg="#333").pack(anchor="w")
+
+        metrics_inner = tk.Frame(metrics_section, bg="white", relief="sunken", bd=1)
+        metrics_inner.pack(anchor="w", pady=(2, 0))
+
+        self.nodes_lbl = tk.Label(metrics_inner, text="Nodes Visited:  0",
+                                   bg="white", font=("Arial", 9), padx=10, pady=2)
+        self.nodes_lbl.grid(row=0, column=0, sticky="w")
+
+        tk.Frame(metrics_inner, bg="#ccc", width=1).grid(row=0, column=1, sticky="ns", padx=4)
+
+        self.cost_lbl = tk.Label(metrics_inner, text="Path Cost:  0",
+                                  bg="white", font=("Arial", 9), padx=10, pady=2)
+        self.cost_lbl.grid(row=0, column=2, sticky="w")
+
+        tk.Frame(metrics_inner, bg="#ccc", width=1).grid(row=0, column=3, sticky="ns", padx=4)
+
+        self.time_lbl = tk.Label(metrics_inner, text="Exec Time:  0 ms",
+                                  bg="white", font=("Arial", 9), padx=10, pady=2)
+        self.time_lbl.grid(row=0, column=4, sticky="w")
+
+        # Vertical divider
+        tk.Frame(bottom_bar, bg="#bbb", width=1).pack(side="left", fill="y", pady=4, padx=5)
+
+        # -- Legend section (right) --
+        legend_section = tk.Frame(bottom_bar, bg="#e0e0e0")
+        legend_section.pack(side="left", padx=10, pady=6)
+
+        tk.Label(legend_section, text="🗺  Legend", bg="#e0e0e0",
+                 font=("Arial", 9, "bold"), fg="#333").pack(anchor="w")
+
+        legend_inner = tk.Frame(legend_section, bg="#e0e0e0")
+        legend_inner.pack(anchor="w", pady=(2, 0))
+
         legends = [
             (START_COLOR, "Start"), (TARGET_COLOR, "Target"), (WALL_COLOR, "Wall"),
             (FRONTIER_COLOR, "Frontier"), (EXPLORED_COLOR, "Visited"), (PATH_COLOR, "Path")
         ]
         for i, (color, label) in enumerate(legends):
-            row_f = tk.Frame(legend_frame, bg=SIDEBAR_BG)
-            row_f.pack(fill="x", anchor="w")
-            tk.Label(row_f, bg=color, width=2, relief="solid", bd=1).pack(side="left", padx=2, pady=1)
-            tk.Label(row_f, text=label, bg=SIDEBAR_BG, font=("Arial", 7)).pack(side="left")
+            item = tk.Frame(legend_inner, bg="#e0e0e0")
+            item.grid(row=0, column=i, padx=6)
+            tk.Label(item, bg=color, width=3, height=1,
+                     relief="solid", bd=1).pack(side="left", padx=(0, 3))
+            tk.Label(item, text=label, bg="#e0e0e0",
+                     font=("Arial", 8)).pack(side="left")
 
     def set_status(self, text, color="black"):
         self.status_lbl.config(text=text, fg=color)
@@ -227,9 +282,13 @@ class GridApp:
         self.start_pos = None
         self.target_pos = None
         self.grid = []
-        self.canvas.config(width=self.cols * CELL_SIZE, height=self.rows * CELL_SIZE)
+        new_w = self.cols * CELL_SIZE
+        new_h = self.rows * CELL_SIZE
+        self.canvas.config(width=new_w, height=new_h)
         self.canvas.delete("all")
+        self.sidebar_container.config(height=new_h)
         self.create_grid()
+        self.root.geometry("")  # Let window auto-resize to fit new grid
 
     def create_grid(self):
         self.grid = []
